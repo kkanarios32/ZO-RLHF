@@ -1,6 +1,6 @@
 # train_online_dpo.py
 from datasets import load_dataset
-from trl import OnlineDPOConfig, OnlineDPOTrainer
+from src.online_dpo_trainer import OnlineDPOConfig, OnlineDPOTrainer
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForSequenceClassification,
@@ -14,7 +14,12 @@ reward_model = AutoModelForSequenceClassification.from_pretrained(
 )
 train_dataset = load_dataset("trl-lib/ultrafeedback-prompt", split="train")
 
-training_args = OnlineDPOConfig(output_dir="online-dpo-qwen2", logging_steps=10)
+training_args = OnlineDPOConfig(
+    per_device_train_batch_size=1,
+    output_dir="online-dpo-qwen2",
+    logging_steps=10
+)
+
 trainer = OnlineDPOTrainer(
     model=model,
     reward_model=reward_model,

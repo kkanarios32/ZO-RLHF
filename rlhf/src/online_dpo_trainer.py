@@ -38,10 +38,8 @@ from transformers.trainer_utils import EvalPrediction, seed_worker
 from transformers.training_args import OptimizerNames
 from transformers.utils import is_peft_available, is_sagemaker_mp_enabled, logging
 
-from ..data_utils import maybe_apply_chat_template
 from ..models import create_reference_model
 from ..models.utils import unwrap_model_for_generation
-from .judges import BasePairwiseJudge
 from .online_dpo_config import OnlineDPOConfig
 from .utils import (
     DPODataCollatorWithPadding,
@@ -64,7 +62,8 @@ if is_apex_available():
 if is_sagemaker_mp_enabled():
     from smdistributed.modelparallel import __version__ as SMP_VERSION
 
-    IS_SAGEMAKER_MP_POST_1_10 = version.parse(SMP_VERSION) >= version.parse("1.10")
+    IS_SAGEMAKER_MP_POST_1_10 = version.parse(
+        SMP_VERSION) >= version.parse("1.10")
 
 else:
     IS_SAGEMAKER_MP_POST_1_10 = False
@@ -84,8 +83,6 @@ class OnlineDPOTrainer(Trainer):
             the model.
         reward_model (`transformers.PreTrainedModel` or `torch.nn.Module` or `None`):
             The reward model to score completions with, preferably an `AutoModelForSequenceClassification`.
-        judge (`BasePairwiseJudge`):
-            The judge to use for pairwise comparison of model completions.
         args (`OnlineDPOConfig`):
             The online DPO config arguments to use for training.
         data_collator (`transformers.DataCollator`):
@@ -117,7 +114,6 @@ class OnlineDPOTrainer(Trainer):
         model: Union[PreTrainedModel, nn.Module],
         ref_model: Union[PreTrainedModel, nn.Module, None] = None,
         reward_model: Union[PreTrainedModel, nn.Module, None] = None,
-        judge: Optional[BasePairwiseJudge] = None,
         args: Optional[OnlineDPOConfig] = None,
         data_collator: Optional[DataCollator] = None,
         train_dataset: Optional[
@@ -146,18 +142,10 @@ class OnlineDPOTrainer(Trainer):
 
         self.ref_model = ref_model
 
-        if reward_model is not None and judge is not None:
-            warnings.warn(
-                "Both `reward_model` and `judge` are provided. Please choose provide only one of them. "
-                "Ignoring `judge` and using `reward_model`."
-            )
-        elif reward_model is None and judge is None:
-            raise ValueError("Either `reward_model` or `judge` must be provided.")
-        elif reward_model is None and judge is not None:
-            raise NotImplementedError("Using `judge` is not yet supported.")
+        if reward_model is None:
+            raise ValueError("`reward_model` must be provided.")
 
         self.reward_model = reward_model
-        self.judge = judge
 
         if args is None:
             raise ValueError("`args` must be provided.")
@@ -197,7 +185,8 @@ class OnlineDPOTrainer(Trainer):
                     model
                 )  # copy, disable gradients, set eval mode
             else:
-                self.ref_model = None  # we don't need a ref model here, we can just disable the adapter.
+                # we don't need a ref model here, we can just disable the adapter.
+                self.ref_model = None
         else:  # rare case, the user provided a ref model
             self.ref_model = ref_model
             self.ref_model.eval()
@@ -215,19 +204,6 @@ class OnlineDPOTrainer(Trainer):
         # Compute that only on the main process for faster data processing.
         # see: https://github.com/huggingface/trl/pull/1255
         with PartialState().local_main_process_first():
-            # Apply the chat template if needed
-            train_dataset = train_dataset.map(
-                maybe_apply_chat_template,
-                fn_kwargs={"tokenizer": tokenizer},
-                num_proc=args.dataset_num_proc,
-            )
-            if eval_dataset is not None:
-                eval_dataset = eval_dataset.map(
-                    maybe_apply_chat_template,
-                    fn_kwargs={"tokenizer": tokenizer},
-                    num_proc=args.dataset_num_proc,
-                )
-
             # Tokenize the dataset
             fn_kwargs = {
                 "is_encoder_decoder": model.config.is_encoder_decoder,
@@ -300,7 +276,8 @@ class OnlineDPOTrainer(Trainer):
             if self.ref_model is not None:
                 self.ref_model = self.ref_model.to(self.accelerator.device)
             if self.reward_model is not None:
-                self.reward_model = self.reward_model.to(self.accelerator.device)
+                self.reward_model = self.reward_model.to(
+                    self.accelerator.device)
 
     @property
     def beta(self):
@@ -324,7 +301,8 @@ class OnlineDPOTrainer(Trainer):
                     prompt_len_input_ids == 0
                     or tokenizer.bos_token_id != batch["input_ids"][0]
                 ):
-                    batch["input_ids"] = [tokenizer.bos_token_id] + batch["input_ids"]
+                    batch["input_ids"] = [
+                        tokenizer.bos_token_id] + batch["input_ids"]
                     batch["attention_mask"] = [1] + batch["attention_mask"]
         else:
             batch = tokenizer(feature["prompt"], add_special_tokens=True)
@@ -365,7 +343,8 @@ class OnlineDPOTrainer(Trainer):
 
         # If we have persistent workers, don't do a fork bomb especially as eval datasets
         # don't change during training
-        dataloader_key = eval_dataset if isinstance(eval_dataset, str) else "eval"
+        dataloader_key = eval_dataset if isinstance(
+            eval_dataset, str) else "eval"
         if (
             hasattr(self, "_eval_dataloaders")
             and dataloader_key in self._eval_dataloaders
@@ -429,12 +408,14 @@ class OnlineDPOTrainer(Trainer):
             completion_ids, self.tokenizer.eos_token_id, self.tokenizer.pad_token_id
         )
         prompt_completion_ids = torch.cat((prompt_ids, completion_ids), dim=1)
-        prompt_completion_mask = torch.cat((prompt_mask, completion_mask), dim=1)
+        prompt_completion_mask = torch.cat(
+            (prompt_mask, completion_mask), dim=1)
 
         # Get the logprobs of the completions from the model
-        output = model(prompt_completion_ids, attention_mask=prompt_completion_mask)
+        output = model(prompt_completion_ids,
+                       attention_mask=prompt_completion_mask)
         # There is 1 offset, because the model predict the next token
-        logits = output.logits[:, context_length - 1 : -1]
+        logits = output.logits[:, context_length - 1: -1]
         # Turn logits into logprobs
         all_logprobs = F.log_softmax(logits, dim=-1)
         # Take the completion tokens logprob
@@ -454,7 +435,7 @@ class OnlineDPOTrainer(Trainer):
                     ref_output = self.model(
                         prompt_completion_ids, attention_mask=prompt_completion_mask
                     )
-            ref_logits = ref_output.logits[:, context_length - 1 : -1]
+            ref_logits = ref_output.logits[:, context_length - 1: -1]
             ref_all_logprobs = F.log_softmax(ref_logits, dim=-1)
             ref_logprobs = torch.take_along_dim(
                 ref_all_logprobs, completion_ids.unsqueeze(-1), dim=2
@@ -556,14 +537,17 @@ class OnlineDPOTrainer(Trainer):
         self.stats["objective/scores_margin"].append(
             self.accelerator.gather(scores_margin.mean()).mean().item()
         )
-        chosen_rewards = self.beta * (chosen_logprobs_sum - chosen_ref_logprobs_sum)
+        chosen_rewards = self.beta * \
+            (chosen_logprobs_sum - chosen_ref_logprobs_sum)
         gathered_chosen_rewards = self.accelerator.gather(chosen_rewards)
-        self.stats["rewards/chosen"].append(gathered_chosen_rewards.mean().item())
+        self.stats["rewards/chosen"].append(
+            gathered_chosen_rewards.mean().item())
         rejected_rewards = self.beta * (
             rejected_logprobs_sum - rejected_ref_logprobs_sum
         )
         gathered_rejected_rewards = self.accelerator.gather(rejected_rewards)
-        self.stats["rewards/rejected"].append(gathered_rejected_rewards.mean().item())
+        self.stats["rewards/rejected"].append(
+            gathered_rejected_rewards.mean().item())
         margin = gathered_chosen_rewards - gathered_rejected_rewards
         self.stats["rewards/margins"].append(margin.mean().item())
         accuracy = margin > 0
